@@ -1,0 +1,392 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Proje dosyalarini olustur
+        run: |
+          mkdir -p proje && cd proje
+          mkdir -p app
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.novax.app"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.novax.app"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "0.1"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+          }
+          EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+              <application
+                  android:allowBackup="false"
+                  android:icon="@android:drawable/ic_btn_speak_now"
+                  android:label="Novax"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".NovaxService"
+                      android:exported="false"
+                      android:foregroundServiceType="microphone" />
+              </application>
+          </manifest>
+          EOF
+          mkdir -p app/src/main/java/com/novax/app
+          cat > app/src/main/java/com/novax/app/MainActivity.kt <<'EOF'
+          package com.novax.app
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.PowerManager
+          import android.provider.Settings
+          import android.text.InputType
+          import android.view.Gravity
+          import android.view.ViewGroup
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+          import androidx.core.content.ContextCompat
+
+          class MainActivity : Activity() {
+
+              private val cyan = Color.parseColor("#00E5FF")
+              private lateinit var status: TextView
+              private lateinit var keyInput: EditText
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val prefs = getSharedPreferences("novax", MODE_PRIVATE)
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(48, 120, 48, 48)
+                  }
+
+                  root.addView(TextView(this).apply {
+                      text = "NOVAX"
+                      textSize = 40f
+                      setTextColor(cyan)
+                      typeface = Typeface.MONOSPACE
+                      gravity = Gravity.CENTER
+                      letterSpacing = 0.3f
+                  })
+
+                  root.addView(TextView(this).apply {
+                      text = "AI MOBİL AJAN · AŞAMA 1"
+                      textSize = 12f
+                      setTextColor(Color.GRAY)
+                      typeface = Typeface.MONOSPACE
+                      gravity = Gravity.CENTER
+                      setPadding(0, 0, 0, 64)
+                  })
+
+                  status = TextView(this).apply {
+                      textSize = 20f
+                      typeface = Typeface.MONOSPACE
+                      gravity = Gravity.CENTER
+                      setPadding(0, 0, 0, 48)
+                  }
+                  root.addView(status)
+
+                  keyInput = EditText(this).apply {
+                      hint = "Groq API anahtarı"
+                      setHintTextColor(Color.GRAY)
+                      setTextColor(Color.WHITE)
+                      inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                      setText(prefs.getString("groq_key", ""))
+                  }
+                  root.addView(keyInput)
+
+                  root.addView(makeButton("Anahtarı kaydet") {
+                      prefs.edit().putString("groq_key", keyInput.text.toString().trim()).apply()
+                      toast("Kaydedildi")
+                  })
+                  root.addView(makeButton("▶ NOVAX'I BAŞLAT") { startNovax() })
+                  root.addView(makeButton("■ DURDUR") {
+                      stopService(Intent(this, NovaxService::class.java))
+                      status.postDelayed({ refreshStatus() }, 500)
+                  })
+                  root.addView(makeButton("Pil kısıtlamasını kaldır") { askBatteryExemption() })
+
+                  setContentView(ScrollView(this).apply {
+                      setBackgroundColor(Color.BLACK)
+                      addView(root)
+                  })
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  refreshStatus()
+              }
+
+              private fun refreshStatus() {
+                  if (NovaxService.running) {
+                      status.text = "● ÇALIŞIYOR"
+                      status.setTextColor(Color.GREEN)
+                  } else {
+                      status.text = "○ DURDU"
+                      status.setTextColor(Color.RED)
+                  }
+              }
+
+              private fun makeButton(label: String, onTap: () -> Unit): Button = Button(this).apply {
+                  text = label
+                  setTextColor(cyan)
+                  setBackgroundColor(Color.parseColor("#0A2A33"))
+                  layoutParams = LinearLayout.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                  ).apply { topMargin = 24 }
+                  setOnClickListener { onTap() }
+              }
+
+              private fun startNovax() {
+                  val needed = mutableListOf<String>()
+                  if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                      needed.add(Manifest.permission.RECORD_AUDIO)
+                  }
+                  if (Build.VERSION.SDK_INT >= 33 &&
+                      checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                  ) {
+                      needed.add(Manifest.permission.POST_NOTIFICATIONS)
+                  }
+                  if (needed.isNotEmpty()) {
+                      requestPermissions(needed.toTypedArray(), 100)
+                      return
+                  }
+                  launchService()
+              }
+
+              override fun onRequestPermissionsResult(
+                  requestCode: Int, permissions: Array<out String>, grantResults: IntArray
+              ) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+                  if (requestCode == 100) {
+                      if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                          launchService()
+                      } else {
+                          toast("Mikrofon izni gerekli")
+                      }
+                  }
+              }
+
+              private fun launchService() {
+                  ContextCompat.startForegroundService(this, Intent(this, NovaxService::class.java))
+                  status.postDelayed({ refreshStatus() }, 600)
+              }
+
+              private fun askBatteryExemption() {
+                  try {
+                      val pm = getSystemService(POWER_SERVICE) as PowerManager
+                      if (pm.isIgnoringBatteryOptimizations(packageName)) {
+                          toast("Zaten muaf")
+                          return
+                      }
+                      startActivity(
+                          Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                              data = Uri.parse("package:$packageName")
+                          }
+                      )
+                  } catch (e: Exception) {
+                      toast("Ayar açılamadı")
+                  }
+              }
+
+              private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+          }
+          EOF
+          mkdir -p app/src/main/java/com/novax/app
+          cat > app/src/main/java/com/novax/app/NovaxService.kt <<'EOF'
+          package com.novax.app
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.app.Service
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.os.IBinder
+          import android.os.PowerManager
+          import androidx.core.app.NotificationCompat
+          import androidx.core.app.ServiceCompat
+
+          class NovaxService : Service() {
+
+              companion object {
+                  const val CHANNEL_ID = "novax_service"
+                  const val NOTIF_ID = 1
+                  const val ACTION_STOP = "com.novax.app.STOP"
+
+                  @Volatile
+                  var running = false
+              }
+
+              private var wakeLock: PowerManager.WakeLock? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  val channel = NotificationChannel(
+                      CHANNEL_ID, "Novax arka plan", NotificationManager.IMPORTANCE_LOW
+                  )
+                  getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  if (intent?.action == ACTION_STOP) {
+                      stopForeground(STOP_FOREGROUND_REMOVE)
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+
+                  try {
+                      ServiceCompat.startForeground(
+                          this, NOTIF_ID, buildNotification(),
+                          ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                      )
+                  } catch (e: Exception) {
+                      // Izin yoksa veya arka plandan baslatildiysa Android reddeder
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+
+                  if (wakeLock == null) {
+                      val pm = getSystemService(POWER_SERVICE) as PowerManager
+                      wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "novax:service").apply {
+                          acquire()
+                      }
+                  }
+
+                  running = true
+                  // Sonraki asamalarda: wake word, ses, Groq burada baslayacak
+                  return START_STICKY
+              }
+
+              private fun buildNotification(): Notification {
+                  val open = PendingIntent.getActivity(
+                      this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
+                  )
+                  val stop = PendingIntent.getService(
+                      this, 1,
+                      Intent(this, NovaxService::class.java).setAction(ACTION_STOP),
+                      PendingIntent.FLAG_IMMUTABLE
+                  )
+                  return NotificationCompat.Builder(this, CHANNEL_ID)
+                      .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                      .setContentTitle("Novax çalışıyor")
+                      .setContentText("Arka planda aktif")
+                      .setContentIntent(open)
+                      .addAction(0, "Durdur", stop)
+                      .setOngoing(true)
+                      .setPriority(NotificationCompat.PRIORITY_LOW)
+                      .build()
+              }
+
+              override fun onDestroy() {
+                  running = false
+                  wakeLock?.let { if (it.isHeld) it.release() }
+                  wakeLock = null
+                  super.onDestroy()
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+          }
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          kotlin.code.style=official
+          EOF
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "Novax"
+          include(":app")
+          EOF
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+      - name: APK derle
+        working-directory: proje
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Novax-APK
+          path: proje/app/build/outputs/apk/debug/app-debug.apk
